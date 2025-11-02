@@ -1,0 +1,828 @@
+# Minimal local orchestration to run modules in Docker
+# Usage (PowerShell on Windows):
+#   cd "C:\Users\Professional\Desktop\Affiantor 2024\affiantor"
+#   docker compose build
+#   docker compose up
+#
+# Notes:
+# - Images are built using tools\docker\Dockerfile.jvm and the MODULE build-arg to target each module.
+# - By default only api-gateway is enabled. You can uncomment additional services as needed.
+# - Services expect dev profile by default. Adjust env vars per your local needs.
+services:
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: api-gateway
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_CLOUD_CONSUL_DISCOVERY_ENABLED: "true"
+      SPRING_CLOUD_GATEWAY_DISCOVERY_LOCATOR_ENABLED: "true"
+      SPRING_CLOUD_CONSUL_DISCOVERY_PREFER_IP_ADDRESS: "true"
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+      # Externalized paths (inside container)
+      LOG_DIR: /app/logs
+      BACKUP_DIRECTORY: /app/backups
+      # Tracing is disabled by default. Uncomment the next two lines to enable local Jaeger
+      # TRACING_ENABLED: "true"
+      # OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger-collector:4318
+    volumes:
+      - ${HOST_LOG_DIR:-../runtime/logs}:/app/logs
+      - ${HOST_BACKUP_DIR:-../runtime/backups}:/app/backups
+    ports:
+      - "8088:8088"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Updater Service (optional; enable to run locally)
+  updater-service:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: updater-service
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Database for local development
+  mariadb:
+    image: mariadb:${MARIADB_VERSION:-11.7.2}
+    # Set platform via env var; override with MARIADB_PLATFORM=linux/amd64 on Intel/AMD
+    platform: ${MARIADB_PLATFORM:-linux/amd64}
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpass
+      MARIADB_DATABASE: affiantordb
+      MARIADB_USER: affiantor
+      MARIADB_PASSWORD: affiantorpass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+      - ../tools/docker/mariadb/affiantor.cnf:/etc/mysql/conf.d/affiantor.cnf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -uroot -prootpass || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 240s
+    networks:
+      - affiantor-net
+
+  # Example additional service. Uncomment to enable and change port mapping if needed.
+  authentication:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: authentication
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      # Point datasource to local MariaDB container
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8081:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+      api-gateway:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Address Service
+  address:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: address
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8082:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Admin Monitoring
+  admin-monitoring:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: admin-monitoring
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8083:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Affidavit Service
+  affidavit-service:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: affidavit-service
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8084:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Affidavit Template Builder
+  affidavit-template-builder:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: affidavit-template-builder
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8085:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Agency Activity
+  agency-activity:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: agency-activity
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8086:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Agency Centre
+  agency-centre:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: agency-centre
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8087:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Basic Detail Profile
+  basic-detail-profile:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: basic-detail-profile
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8089:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Comments Service
+  comments-service:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: comments-service
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8090:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Confirmation Token
+  confirmation-token:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: confirmation-token
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8091:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Contact Detail Profile
+  contact-detail-profile:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: contact-detail-profile
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8092:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Document Manager
+  document-manager:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: document-manager
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8093:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Email Notification
+  email-notification:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: email-notification
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8094:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Licence Manager
+  licence-manager:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: licence-manager
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8095:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Metrics Service
+  metrics-service:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: metrics-service
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8096:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Notary Activity
+  notary-activity:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: notary-activity
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8097:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Notary Centre
+  notary-centre:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: notary-centre
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8098:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Payments Service
+  payments-service:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: payments-service
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8099:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # User Account Recovery
+  user-account-recovery:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: user-account-recovery
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8100:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # User Activity Logger
+  user-activity-logger:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: user-activity-logger
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8101:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # User Identity Profile
+  user-identity-profile:
+    build:
+      context: ..
+      dockerfile: tools/docker/Dockerfile.jvm
+      args:
+        MODULE: user-identity-profile
+    pull_policy: build
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      CONSUL_HOST: consul
+      CONSUL_PORT: 8500
+      SPRING_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/affiantordb?createDatabaseIfNotExist=true&sessionVariables=sql_mode='NO_ENGINE_SUBSTITUTION'&jdbcCompliantTruncation=false
+      SPRING_DATASOURCE_USERNAME: affiantor
+      SPRING_DATASOURCE_PASSWORD: affiantorpass
+      JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75
+    ports:
+      - "8102:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affiantor-net
+
+  # Local Consul for service discovery in dev
+  consul:
+    image: hashicorp/consul:1.19
+    command: consul agent -server -bootstrap-expect=1 -ui -client=0.0.0.0 -bind=0.0.0.0 -data-dir=/consul/data
+    ports:
+      - "8500:8500"
+    healthcheck:
+      test: ["CMD", "consul", "info"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - affiantor-net
+
+# Optional Jaeger for local tracing (uncomment to enable)
+  jaeger-collector:
+    image: jaegertracing/all-in-one:1.57
+    profiles:
+      - observability
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4318:4318"     # OTLP HTTP
+    networks:
+      - affiantor-net
+
+  # Optional Prometheus for metrics/tracing export (Jaeger Monitor uses this)
+  prometheus:
+    image: prom/prometheus:v1.14.8
+    profiles:
+      - observability
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ../tools/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      consul:
+        condition: service_started
+    networks:
+      - affiantor-net
+
+networks:
+  affiantor-net:
+    driver: bridge
+
+volumes:
+  mariadb-data:
+  prometheus-data:
